@@ -12,12 +12,10 @@
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
-#include "nvs_flash.h"
 #include <stdio.h>
 #include <string>
 #include <cstddef>
 #include <Wire.h>
-#include <Preferences.h>
 #include <WiFi.h>
 #include <InfluxDbClient.h>
 #include <InfluxDbCloud.h>
@@ -51,7 +49,7 @@ String hostname = "";
 // InfluxDB v2 bucket name (Use: InfluxDB UI ->  Data -> Buckets)
 #define INFLUXDB_BUCKET ""
 #define TZ_INFO ""
-Point DEFENDER("");
+Point DEFENDER("DEFENDER");
 
 #define MAX_CH 13     // 1 - 14 channels (1-11 for US, 1-13 for EU and 1-14 for Japan)
 #define SNAP_LEN 2324 // max len of each recieved packet
@@ -63,28 +61,37 @@ Point DEFENDER("");
 
 PCA9539 ledport(0x27);
 Adafruit_SSD1306 display(128, 64, &Wire, 4);
-Preferences preferences;
 InfluxDBClient client(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
 
 TimerHandle_t ifdbTimer;
+TimerHandle_t postTimer;
+TimerHandle_t chTimer;
 
-uint32_t prev_time = 0;
-uint32_t now_time = 0;
 uint32_t tmp;
 uint32_t pkts[MAX_X]; // here the packets per second will be saved
 uint32_t deauths = 0; // deauth frames per second
 uint32_t tlpkts = 0;
 bool deauth_ch[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 uint32_t ch_pkt[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-uint32_t avg = 0;
+uint32_t pps = 0;
 bool ifdb = false;
+bool post = false;
+bool sw = false;
 bool is_deauth = false;
 unsigned int ch = 1;
-int rssi_avg;
+int rssi;
 
 void vTimerCallback1(TimerHandle_t ifdbTimer)
 {
   ifdb = true;
+}
+void vTimerCallback2(TimerHandle_t postTimer)
+{
+  post = true;
+}
+void vTimerCallback3(TimerHandle_t chTimer)
+{
+  sw = true;
 }
 
 esp_err_t event_handler(void *ctx, system_event_t *event)
@@ -149,7 +156,7 @@ void wifi_promiscuous(void *buf, wifi_promiscuous_pkt_type_t type)
   if (type == WIFI_PKT_MGMT)
     packetLength -= 4;
   tmp++;
-  rssi_avg += ctrl.rssi;
+  rssi == ctrl.rssi;
 }
 
 void updateDisplay()
@@ -158,10 +165,6 @@ void updateDisplay()
   int len;
   int rssi;
 
-  if (pkts[MAX_X - 1] > 0)
-    rssi = rssi_avg / (int)pkts[MAX_X - 1];
-  else
-    rssi = rssi_avg;
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
@@ -169,9 +172,8 @@ void updateDisplay()
   display.print("CH");
   display.setCursor(12, 0);
   display.print(ch);
-
-  display.setCursor(40, 0);
-  display.print(avg);
+  display.setCursor(35, 0);
+  display.print(rssi);
   display.setCursor(65, 0);
   display.print(deauths);
   display.setCursor(80, 0);
@@ -204,11 +206,16 @@ void updateDisplay()
     if (i < MAX_X - 1)
       pkts[i] = pkts[i + 1];
   }
+  display.setTextSize(2);
+  display.setTextColor(BLACK);
+  display.setCursor(45, 45);
+  display.print(pps);
   display.display();
 }
 
 void setup()
 {
+
   Serial.begin(115200);
   Wire.begin(19, 18, 400000);
   delay(150);
@@ -216,7 +223,6 @@ void setup()
   display.clearDisplay();
   display.display();
   delay(150);
-  preferences.begin("packetmonitor32", false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
   WiFi.setHostname(hostname.c_str()); //define hostname
@@ -247,16 +253,20 @@ void setup()
   xTaskCreatePinnedToCore(
       mainTask,   /* Function to implement the task */
       "mainTask", /* Name of the task */
-      50000,       /* Stack size in words */
-      NULL,        /* Task input parameter */
-      1,           /* Priority of the task */
-      NULL,        /* Task handle. */
-      0);          /* Core where the task should run */
+      50000,      /* Stack size in words */
+      NULL,       /* Task input parameter */
+      1,          /* Priority of the task */
+      NULL,       /* Task handle. */
+      0);         /* Core where the task should run */
 
   esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous);
   esp_wifi_set_promiscuous(true);
   ifdbTimer = xTimerCreate("Timer1", 5000, pdTRUE, (void *)0, vTimerCallback1);
   xTimerStart(ifdbTimer, 0);
+  postTimer = xTimerCreate("Timer2", 1000, pdTRUE, (void *)0, vTimerCallback2);
+  xTimerStart(postTimer, 0);
+  chTimer = xTimerCreate("Timer3", 50, pdTRUE, (void *)0, vTimerCallback3);
+  xTimerStart(chTimer, 0);
 }
 
 void loop()
@@ -265,33 +275,25 @@ void loop()
 
 void mainTask(void *p)
 {
-  uint32_t now_time;
-
   for (int i = 0; i < 16; i++)
   {
     ledport.pinMode(i, OUTPUT);
     ledport.digitalWrite(i, HIGH);
   }
   delay(500);
-
   for (int i = 0; i < 13; i++)
   {
     ledport.digitalWrite(i, LOW);
   }
-
   while (true)
   {
-    now_time = millis();
-    if (now_time - prev_time > 1000)
+    if (post)
     {
-      prev_time = now_time;
-
       for (int i = 0; i < 13; i++)
       {
-        avg += ch_pkt[i];
+        pps += ch_pkt[i];
       }
-      avg = avg/13;
-      pkts[MAX_X - 1] = (uint32_t)avg;
+      pkts[MAX_X - 1] = (uint32_t)pps;
       updateDisplay();
       if (deauths >= 1)
       {
@@ -304,35 +306,39 @@ void mainTask(void *p)
         is_deauth = false;
       }
       deauths = 0;
-      rssi_avg = 0;
+      post = false;
     }
-    ledport.digitalWrite((uint8_t)13, !ledport.digitalRead(13));
-    delay(50);
-    ledport.digitalWrite((uint8_t)13, !ledport.digitalRead(13));
-    if (deauth_ch[ch - 2] == 0)
+    if (sw)
     {
 
-      ledport.digitalWrite((uint8_t)ch - 2, LOW);
+      if (deauth_ch[ch - 2] == 0)
+      {
+
+        ledport.digitalWrite((uint8_t)ch - 2, LOW);
+      }
+      ch_pkt[ch - 2] = tmp * 20;
+      tlpkts += tmp * 20;
+      ch++;
+      tmp = 0;
+      ledport.digitalWrite((uint8_t)ch - 2, HIGH);
+      if (ch > MAX_CH + 1)
+      {
+        ch = 1;
+      }
+      sw = false;
+      ledport.digitalWrite((uint8_t)13, !ledport.digitalRead(13));
     }
-    ch_pkt[ch - 2] = tmp * 20;
-    tlpkts += tmp * 20;
-    ch++;
-    tmp = 0;
-    ledport.digitalWrite((uint8_t)ch - 2, HIGH);
-    if (ch > MAX_CH + 1)
-    {
-      ch = 1;
-    }
+
     if (ifdb)
     {
       DEFENDER.clearFields();
       DEFENDER.clearTags();
       DEFENDER.addTag("UID", "N/A");
-      DEFENDER.addField("Total Packets Received", tlpkts);
-      DEFENDER.addField("Packets per Second", avg);
+      DEFENDER.addField("Total Pkts", tlpkts);
+      DEFENDER.addField("Total PPS", pps);
       DEFENDER.addField("Deauth Status", is_deauth);
-      DEFENDER.addField("Deauths per Second", deauths);
       DEFENDER.addField("CPU Temperature", ((temprature_sens_read() - 32) / 1.8));
+      DEFENDER.addField("Deauths PPS", deauths);
       DEFENDER.addField("CH1 PPS", (ch_pkt[0]));
       DEFENDER.addField("CH2 PPS", (ch_pkt[1]));
       DEFENDER.addField("CH3 PPS", (ch_pkt[2]));
