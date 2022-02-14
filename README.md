@@ -1,7 +1,7 @@
 # DEFENDER
 
 
-This is a 2.4GHz Wi-Fi scanner for measuring channel usage and detect deauthentication attacks. The collected data is sent to a database to be analyzed and provide notifications.
+This is a 2.4GHz Wi-Fi scanner for estimating channel usage and detect deauthentication attacks. The collected data is sent to a database to be analyzed and provide notifications.
 
 ![Cover Image](https://github.com/edward62740/defender/blob/main/defender.png)
 
