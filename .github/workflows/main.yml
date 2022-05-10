@@ -1,8 +1,10 @@
+
 name: CI
+
 
 defaults:
   run:
-    working-directory: ./
+    working-directory: "./"
     
 on:
   push:
@@ -11,6 +13,7 @@ on:
     branches: [ master ]
   schedule:
     - cron: '0 2 * * 0'
+
 jobs:
   build:
     runs-on: windows-latest
@@ -27,3 +30,4 @@ jobs:
         python -m pip install --upgrade pip
         pip install platformio
     - name: Build
+      run: platformio run -e esp32dev
