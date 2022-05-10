@@ -1,10 +1,6 @@
 
 name: CI
 
-defaults:
-  run:
-    working-directory: "./"
-    
 on:
   push:
     branches: [ master ]
